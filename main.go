@@ -8,10 +8,8 @@ import (
 
 // This example program simulates a Joux key exchange. Based on the C-based
 // implementation from https://github.com/blynn/pbc/blob/master/example/joux.c.
-
-func main() {
-	pbc.SetLogging(true)
-	fmt.Println("hello world")
+func BenchmarkJouxKeyExchange(isDebug bool) (setupTime time.Duration, onlineTime time.Duration) {
+	startSetup := time.Now()
 
 	// Prime r must have 160 bits, and prime q must have 512 bits. These are
 	// suggested parameters from https://crypto.stanford.edu/pbc/manual/ch05s01.html,
@@ -20,11 +18,8 @@ func main() {
 	// must be infeasible in finite fields of order q^2, e.g. rbits = 160,
 	// qbits = 512."
 	params := pbc.GenerateA(160, 512)
-
-	fmt.Println(params.String())
-
 	pairing := params.NewPairing()
-	fmt.Println(pairing.IsSymmetric())
+	setupTime = time.Since(startSetup)
 
 	P := pairing.NewG1()
 	aP := pairing.NewG1()
@@ -43,8 +38,9 @@ func main() {
 	keyB := pairing.NewGT()
 	keyC := pairing.NewGT()
 
-	fmt.Println("Starting Joux key exchange...")
-	start := time.Now()
+	// Actual protocol starts.
+
+	startOnline := time.Now()
 
 	P.Rand()
 	a.Rand()
@@ -67,21 +63,50 @@ func main() {
 	e_aP_bP.Pair(aP, bP)
 	keyC.PowZn(e_aP_bP, c)
 
-	duration := time.Since(start)
-	fmt.Println("Done! Time elapsed: ", duration)
+	onlineTime = time.Since(startOnline)
 
-	fmt.Println("aP = ", aP)
-	fmt.Println("bP = ", bP)
-	fmt.Println("cP = ", cP)
+	if isDebug {
+		fmt.Println("Done! Time elapsed: ")
+		fmt.Println("   (setup) ", setupTime)
+		fmt.Println("  (online) ", onlineTime)
 
-	fmt.Println("Key A = ", keyA)
-	fmt.Println("Key B = ", keyB)
-	fmt.Println("Key C = ", keyC)
+		fmt.Println("aP = ", aP)
+		fmt.Println("bP = ", bP)
+		fmt.Println("cP = ", cP)
 
-	isKeysMatch := keyA.Equals(keyB) && keyA.Equals(keyC)
-	if isKeysMatch {
-		fmt.Println("All keys match!")
-	} else {
-		fmt.Println("Keys do not match. Something went wrong!")
+		fmt.Println("Key A = ", keyA)
+		fmt.Println("Key B = ", keyB)
+		fmt.Println("Key C = ", keyC)
+
+		isKeysMatch := keyA.Equals(keyB) && keyA.Equals(keyC)
+		if isKeysMatch {
+			fmt.Println("All keys match!")
+		} else {
+			fmt.Println("Keys do not match. Something went wrong!")
+		}
 	}
+
+	return
+}
+
+func main() {
+	pbc.SetLogging(false)
+
+	fmt.Println("Testing Joux Benchmark...")
+	BenchmarkJouxKeyExchange(true)
+
+	totalRuns := 1000
+	fmt.Println("Running full benchmark with", totalRuns, "runs...")
+	var totalSetup time.Duration
+	var totalOnline time.Duration
+
+	for i := 1; i <= totalRuns; i++ {
+	    setupTime, onlineTime := BenchmarkJouxKeyExchange(false)
+	    totalSetup += setupTime
+	    totalOnline += onlineTime
+	}
+
+	fmt.Println("Done! Average time elapsed: ")
+	fmt.Println("   (setup) ", totalSetup / 1000)
+	fmt.Println("  (online) ", totalOnline / 1000)
 }
