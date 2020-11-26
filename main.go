@@ -6,6 +6,7 @@ import (
 	"hash"
 	"math/rand"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Nik-U/pbc"
@@ -154,6 +155,75 @@ func (scheme *DualAPSIScheme) Interaction(
 	return totalTime, intersection
 }
 
+func (scheme *DualAPSIScheme) ThreadedInteraction(
+		clientSet RawElementSlice, clientSignatures []*pbc.Element,
+		serverSet RawElementSlice, serverSignatures []*pbc.Element) (time.Duration, RawElementSlice) {
+
+	startTime := time.Now()
+
+	// Step 1: C -> S: {rxP}
+	r := scheme.pairing.NewZr()
+	rxP := scheme.pairing.NewG1()
+	ryP := scheme.pairing.NewG1()
+
+	r.Rand()
+	rxP.MulZn(scheme.xP, r)
+	ryP.MulZn(scheme.yP, r)
+
+	// Step 2: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
+	serverHashes := make(map[[32]byte]bool)
+	var serverWG sync.WaitGroup
+	var serverLock sync.RWMutex
+	serverWG.Add(len(serverSignatures))
+	for _, serverSignature := range serverSignatures {
+		go func(signature *pbc.Element) {
+			// Recall that serverSignature = H(c_i)^y.
+			e_sig_rxP := scheme.pairing.NewGT()
+			e_sig_rxP.Pair(signature, rxP)
+
+			hashed := sha256.Sum256(e_sig_rxP.Bytes())
+
+			serverLock.Lock()
+			serverHashes[hashed] = true
+			serverLock.Unlock()
+
+			serverWG.Done()
+		}(serverSignature)
+	}
+	serverWG.Wait()
+
+	// Step 3: C computes u_i = e(H(c_i)^x, P^y)^r_c
+	var intersection RawElementSlice
+	var clientWG sync.WaitGroup
+	var clientLock sync.RWMutex
+	clientWG.Add(len(clientSignatures))
+	for i, clientSignature := range clientSignatures {
+		go func(signature *pbc.Element, index int) {
+			e_sig_ryP := scheme.pairing.NewGT()
+			e_sig_ryP.Pair(signature, ryP)
+
+			hashed := sha256.Sum256(e_sig_ryP.Bytes())
+
+			serverLock.RLock()
+			_, serverHas := serverHashes[hashed]
+			serverLock.RUnlock()
+
+			if serverHas {
+				clientLock.Lock()
+				intersection = append(intersection, clientSet[index])
+				clientLock.Unlock()
+			}
+
+			clientWG.Done()
+		}(clientSignature, i)
+	}
+	clientWG.Wait()
+
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
+}
+
 func BenchmarkDualPSIInteraction(isDebug bool, clientCardinality int, serverCardinality int) {
 	setupTime, scheme := NewDualAPSIScheme()
 	fmt.Println("Setup time:", setupTime)
@@ -161,9 +231,10 @@ func BenchmarkDualPSIInteraction(isDebug bool, clientCardinality int, serverCard
 	clientSet := generateRandomSet(clientCardinality)
 	serverSet := generateRandomSet(serverCardinality)
 
-	realIntersection := findRealIntersection(clientSet, serverSet)
+	realTime, realIntersection := findRealIntersection(clientSet, serverSet)
 	sort.Sort(realIntersection)
 	fmt.Println("Real intersection: ", realIntersection)
+	fmt.Println("Real time:", realTime)
 
 	clientSigningTime, clientSignatures :=
 		scheme.generateSignaturesOnSet(clientSet, ClientParty)
@@ -177,12 +248,19 @@ func BenchmarkDualPSIInteraction(isDebug bool, clientCardinality int, serverCard
 	fmt.Println("Interaction time:", interactionTime)
 	fmt.Println("Protocol intersection: ", protocolIntersection)
 
+	interactionTime, protocolIntersection = scheme.ThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures)
+	sort.Sort(protocolIntersection)
+	fmt.Println("Threaded interaction time:", interactionTime)
+	fmt.Println("Protocol threaded intersection: ", protocolIntersection)
+
 	// Verify equality:
 	isEqual := sameRawElementSlice(realIntersection, protocolIntersection)
 	fmt.Println("Correct?", isEqual)
 }
 
-func findRealIntersection(clientSet RawElementSlice, serverSet RawElementSlice) RawElementSlice {
+func findRealIntersection(clientSet RawElementSlice, serverSet RawElementSlice) (time.Duration, RawElementSlice) {
+	startTime := time.Now()
+
 	lookupTable := make(map[RawElement]bool)
 	for _, element := range clientSet {
 		lookupTable[element] = true
@@ -196,7 +274,8 @@ func findRealIntersection(clientSet RawElementSlice, serverSet RawElementSlice) 
 		}
 	}
 
-	return intersection
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
 }
 
 func generateRandomSet(size int) RawElementSlice {
@@ -351,7 +430,7 @@ func main() {
 	BenchmarkDualPSIInteraction(true, 1000, 1000)
 
 	fmt.Println("Testing Joux Benchmark...")
-	BenchmarkJouxKeyExchange(true)
+	BenchmarkJouxKeyExchange(false)
 
 	totalRuns := 1000
 	fmt.Println("Running full benchmark with", totalRuns, "runs...")
