@@ -5,14 +5,25 @@ import (
 	"fmt"
 	"hash"
 	"math/rand"
+	"os"
+	"log"
+	"runtime"
+	"runtime/pprof"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+	"flag"
 
 	"github.com/Nik-U/pbc"
+	"github.com/olekukonko/tablewriter"
+	// "github.com/cornelk/hashmap"
 )
 
-type RawElement [2]byte
+var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+
+type RawElement [4]byte
 type RawElementSlice []RawElement
 
 func (p RawElementSlice) Len() int {
@@ -116,7 +127,8 @@ func (scheme *DualAPSIScheme) Interaction(
 
 	startTime := time.Now()
 
-	// Step 1: C -> S: {rxP}
+	// Step 1: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
 	r := scheme.pairing.NewZr()
 	rxP := scheme.pairing.NewG1()
 	ryP := scheme.pairing.NewG1()
@@ -125,8 +137,6 @@ func (scheme *DualAPSIScheme) Interaction(
 	rxP.MulZn(scheme.xP, r)
 	ryP.MulZn(scheme.yP, r)
 
-	// Step 2: S -> C: {t_0, ..., t_{n-1}}
-	// where t_j = e(H(s_j)^y, P^xr_c)
 	serverHashes := make(map[[32]byte]bool)
 	e_sig_rxP := scheme.pairing.NewGT()
 	for _, serverSignature := range serverSignatures {
@@ -161,7 +171,8 @@ func (scheme *DualAPSIScheme) ThreadedInteraction(
 
 	startTime := time.Now()
 
-	// Step 1: C -> S: {rxP}
+	// Step 1: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
 	r := scheme.pairing.NewZr()
 	rxP := scheme.pairing.NewG1()
 	ryP := scheme.pairing.NewG1()
@@ -170,8 +181,6 @@ func (scheme *DualAPSIScheme) ThreadedInteraction(
 	rxP.MulZn(scheme.xP, r)
 	ryP.MulZn(scheme.yP, r)
 
-	// Step 2: S -> C: {t_0, ..., t_{n-1}}
-	// where t_j = e(H(s_j)^y, P^xr_c)
 	serverHashes := make(map[[32]byte]bool)
 	var serverWG sync.WaitGroup
 	var serverLock sync.RWMutex
@@ -205,10 +214,7 @@ func (scheme *DualAPSIScheme) ThreadedInteraction(
 
 			hashed := sha256.Sum256(e_sig_ryP.Bytes())
 
-			serverLock.RLock()
 			_, serverHas := serverHashes[hashed]
-			serverLock.RUnlock()
-
 			if serverHas {
 				clientLock.Lock()
 				intersection = append(intersection, clientSet[index])
@@ -224,41 +230,508 @@ func (scheme *DualAPSIScheme) ThreadedInteraction(
 	return totalTime, intersection
 }
 
-func BenchmarkDualPSIInteraction(isDebug bool, clientCardinality int, serverCardinality int) {
-	setupTime, scheme := NewDualAPSIScheme()
-	fmt.Println("Setup time:", setupTime)
+func (scheme *DualAPSIScheme) SmarterThreadedInteraction(
+		clientSet RawElementSlice, clientSignatures []*pbc.Element,
+		serverSet RawElementSlice, serverSignatures []*pbc.Element,
+		numThreads int) (time.Duration, RawElementSlice) {
 
+	startTime := time.Now()
+
+	// Step 1: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
+	r := scheme.pairing.NewZr()
+	rxP := scheme.pairing.NewG1()
+	ryP := scheme.pairing.NewG1()
+
+	r.Rand()
+	rxP.MulZn(scheme.xP, r)
+	ryP.MulZn(scheme.yP, r)
+
+
+	serverHashes := make(map[[32]byte]bool)
+	var serverWG sync.WaitGroup
+	var serverLock sync.RWMutex
+
+	serverChan := make(chan *pbc.Element, len(serverSignatures))
+	for _, v := range serverSignatures {
+		serverChan <- v
+	}
+	close(serverChan)
+
+	serverWG.Add(numThreads)
+	for i := 0; i < numThreads; i++ {
+		go func() {
+			e_sig_rxP := scheme.pairing.NewGT()
+
+			for signature := range serverChan {
+				// Recall that serverSignature = H(c_i)^y.
+				e_sig_rxP.Pair(signature, rxP)
+				hashed := sha256.Sum256(e_sig_rxP.Bytes())
+
+				serverLock.Lock()
+				serverHashes[hashed] = true
+				serverLock.Unlock()
+			}
+
+			serverWG.Done()
+		}()
+	}
+	serverWG.Wait()
+
+	// Step 3: C computes u_i = e(H(c_i)^x, P^y)^r_c
+
+	clientChan := make(chan *pbc.Element, len(clientSignatures))
+	for _, v := range clientSignatures {
+		clientChan <- v
+	}
+	close(clientChan)
+
+	var intersection RawElementSlice
+	var clientWG sync.WaitGroup
+	var clientLock sync.RWMutex
+	clientWG.Add(numThreads)
+	for i := 0; i < numThreads; i++ {
+		go func() {
+			e_sig_ryP := scheme.pairing.NewGT()
+
+			for signature := range clientChan {
+				e_sig_ryP.Pair(signature, ryP)
+
+				hashed := sha256.Sum256(e_sig_ryP.Bytes())
+
+				_, serverHas := serverHashes[hashed]
+				if serverHas {
+					clientLock.Lock()
+					intersection = append(intersection, clientSet[0])  // TODO: make this actually append correct element, just doing this for now to get a sense of the append time
+					clientLock.Unlock()
+				}
+			}
+
+			clientWG.Done()
+		}()
+	}
+	clientWG.Wait()
+
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
+}
+
+func (scheme *DualAPSIScheme) AtomicsThreadedInteraction(
+		clientSet RawElementSlice, clientSignatures []*pbc.Element,
+		serverSet RawElementSlice, serverSignatures []*pbc.Element,
+		numThreads int) (time.Duration, RawElementSlice) {
+
+	startTime := time.Now()
+
+	// Step 1: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
+	r := scheme.pairing.NewZr()
+	rxP := scheme.pairing.NewG1()
+	ryP := scheme.pairing.NewG1()
+
+	r.Rand()
+	rxP.MulZn(scheme.xP, r)
+	ryP.MulZn(scheme.yP, r)
+
+	serverHashes := make(map[[32]byte]bool)
+	var serverWG sync.WaitGroup
+	var serverLock sync.RWMutex
+
+	var serverNextIndex uint64  // serverNextIndex = 0
+	serverStopIndex := uint64(len(serverSignatures))
+
+	serverWG.Add(numThreads)
+	for i := 0; i < numThreads; i++ {
+		go func() {
+			e_sig_rxP := scheme.pairing.NewGT()
+
+			for {
+				index := atomic.AddUint64(&serverNextIndex, 1) - 1
+				if index >= serverStopIndex {
+					break
+				}
+
+				// Recall that serverSignature = H(c_i)^y.
+				e_sig_rxP.Pair(serverSignatures[index], rxP)
+				hashed := sha256.Sum256(e_sig_rxP.Bytes())
+
+				serverLock.Lock()
+				serverHashes[hashed] = true
+				serverLock.Unlock()
+			}
+
+			serverWG.Done()
+		}()
+	}
+	serverWG.Wait()
+
+	// Step 3: C computes u_i = e(H(c_i)^x, P^y)^r_c
+
+	var clientNextIndex uint64  // clientNextIndex = 0
+	clientStopIndex := uint64(len(clientSignatures))
+
+	var intersection RawElementSlice
+	var clientWG sync.WaitGroup
+	var clientLock sync.RWMutex
+
+	clientWG.Add(numThreads)
+	for i := 0; i < numThreads; i++ {
+		go func() {
+			e_sig_ryP := scheme.pairing.NewGT()
+
+			for {
+				index := atomic.AddUint64(&clientNextIndex, 1) - 1
+				if index >= clientStopIndex {
+					break
+				}
+
+				e_sig_ryP.Pair(clientSignatures[index], ryP)
+				hashed := sha256.Sum256(e_sig_ryP.Bytes())
+
+				_, serverHas := serverHashes[hashed]
+				if serverHas {
+					clientLock.Lock()
+					intersection = append(intersection, clientSet[0])  // TODO: make this actually append correct element, just doing this for now to get a sense of the append time
+					clientLock.Unlock()
+				}
+			}
+
+			clientWG.Done()
+		}()
+	}
+	clientWG.Wait()
+
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
+}
+
+func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
+		clientSet RawElementSlice, clientSignatures []*pbc.Element,
+		serverSet RawElementSlice, serverSignatures []*pbc.Element,
+		numThreads int) (time.Duration, RawElementSlice) {
+
+	startTime := time.Now()
+
+	// Step 1: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
+	r := scheme.pairing.NewZr()
+	rxP := scheme.pairing.NewG1()
+	ryP := scheme.pairing.NewG1()
+
+	r.Rand()
+	rxP.MulZn(scheme.xP, r)
+	ryP.MulZn(scheme.yP, r)
+
+	serverHashes := make(map[[32]byte]bool)
+	var serverWG sync.WaitGroup
+	var serverLock sync.RWMutex
+
+	numServerElts := len(serverSignatures)
+	numPerServerThread := int(numServerElts / numThreads)
+
+	serverWG.Add(numThreads)
+	for threadNum := 0; threadNum < numThreads; threadNum++ {
+		go func(threadNumber int) {
+			// Recall that serverSignature = H(c_i)^y.
+			e_sig_rxP := scheme.pairing.NewGT()
+
+			start := numPerServerThread * threadNumber
+			end := start + numPerServerThread
+			if end > numServerElts {
+				end = numServerElts
+			}
+
+			for i := start; i < end; i++ {
+				e_sig_rxP.Pair(serverSignatures[i], rxP)
+				hashed := sha256.Sum256(e_sig_rxP.Bytes())
+
+				serverLock.Lock()
+				serverHashes[hashed] = true
+				serverLock.Unlock()
+			}
+
+			serverWG.Done()
+		}(threadNum)
+	}
+	serverWG.Wait()
+
+	// Step 3: C computes u_i = e(H(c_i)^x, P^y)^r_c
+	var intersection RawElementSlice
+	var clientWG sync.WaitGroup
+	var clientLock sync.RWMutex
+
+	numClientElts := len(clientSignatures)
+	numPerClientThread := int(numClientElts / numThreads)
+
+	clientWG.Add(numThreads)
+	for threadNum := 0; threadNum < numThreads; threadNum++ {
+		go func(threadNumber int) {
+			e_sig_ryP := scheme.pairing.NewGT()
+
+			start := numPerClientThread * threadNumber
+			end := start + numPerClientThread
+			if end > numClientElts {
+				end = numClientElts
+			}
+
+			for i := start; i < end; i++ {
+				e_sig_ryP.Pair(clientSignatures[i], ryP)
+				hashed := sha256.Sum256(e_sig_ryP.Bytes())
+
+				_, serverHas := serverHashes[hashed]
+				if serverHas {
+					clientLock.Lock()
+					intersection = append(intersection, clientSet[i])
+					clientLock.Unlock()
+				}
+			}
+
+			clientWG.Done()
+		}(threadNum)
+	}
+	clientWG.Wait()
+
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
+}
+
+func (scheme *DualAPSIScheme) PrecomputeThreadedInteraction(
+		clientSet RawElementSlice, clientSignatures []*pbc.Element,
+		serverSet RawElementSlice, serverSignatures []*pbc.Element) (time.Duration, RawElementSlice) {
+
+	// Precomputation phase.
+	// Server precomputes e(H(s_j)^y, P^x) (missing r)
+	var pairedSignatures []*pbc.Element
+	var pairedSignaturesLock sync.RWMutex
+	var pairedSignaturesWG sync.WaitGroup
+	pairedSignaturesWG.Add(len(serverSignatures))
+	for _, serverSignature := range serverSignatures {
+		go func(signature *pbc.Element) {
+			e_sig_xP := scheme.pairing.NewGT()
+			e_sig_xP.Pair(signature, scheme.xP)
+
+			pairedSignaturesLock.Lock()
+			pairedSignatures = append(pairedSignatures, e_sig_xP)
+			pairedSignaturesLock.Unlock()
+
+			pairedSignaturesWG.Done()
+		}(serverSignature)
+	}
+	pairedSignaturesWG.Wait()
+
+	// Online phase.
+
+	startTime := time.Now()
+
+	// Step 2: S -> C: {t_0, ..., t_{n-1}}
+	// where t_j = e(H(s_j)^y, P^xr_c)
+	r := scheme.pairing.NewZr()
+	ryP := scheme.pairing.NewG1()
+	r.Rand()
+	ryP.MulZn(scheme.yP, r)
+
+	serverHashes := make(map[[32]byte]bool)
+	var serverWG sync.WaitGroup
+	var serverLock sync.RWMutex
+	serverWG.Add(len(pairedSignatures))
+	for _, pairedSignature := range pairedSignatures {
+		go func(pairedSignature *pbc.Element) {
+			// Recall that pairedSignature = H(c_i)^y.
+			e_sig_rxP := scheme.pairing.NewGT()
+			e_sig_rxP.PowZn(pairedSignature, r)
+
+			hashed := sha256.Sum256(e_sig_rxP.Bytes())
+
+			serverLock.Lock()
+			serverHashes[hashed] = true
+			serverLock.Unlock()
+
+			serverWG.Done()
+		}(pairedSignature)
+	}
+	serverWG.Wait()
+
+	// Step 3: C computes u_i = e(H(c_i)^x, P^y)^r_c
+	var intersection RawElementSlice
+	var clientWG sync.WaitGroup
+	var clientLock sync.RWMutex
+	clientWG.Add(len(clientSignatures))
+	for i, clientSignature := range clientSignatures {
+		go func(signature *pbc.Element, index int) {  // every thread in go has stack of 2KB, which isn't that bad 2kb * 100k elements = 200mb of stack
+			e_sig_ryP := scheme.pairing.NewGT()
+			e_sig_ryP.Pair(signature, ryP)
+
+			hashed := sha256.Sum256(e_sig_ryP.Bytes())
+
+			_, serverHas := serverHashes[hashed]
+			if serverHas {
+				clientLock.Lock()
+				intersection = append(intersection, clientSet[index])
+				clientLock.Unlock()
+			}
+
+			clientWG.Done()
+		}(clientSignature, i)
+	}
+	clientWG.Wait()
+
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
+}
+
+type DualPSIBenchmark struct {
+	clientCardinality int
+	serverCardinality int
+
+	insecureTime time.Duration
+	naiveTime time.Duration
+
+	setupTime time.Duration
+
+	clientSigningTime time.Duration
+	serverSigningTime time.Duration
+
+	interactionTime time.Duration
+	threadedTime time.Duration
+	precomputeInteractionTime time.Duration
+}
+
+func BenchmarkDualPSIInteraction(isDebug bool, doGarbageCollectBetweenRuns bool, clientCardinality int, serverCardinality int) DualPSIBenchmark {
 	clientSet := generateRandomSet(clientCardinality)
 	serverSet := generateRandomSet(serverCardinality)
 
-	realTime, realIntersection := findRealIntersection(clientSet, serverSet)
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	insecureTime, realIntersection := findInsecureIntersection(clientSet, serverSet)
 	sort.Sort(realIntersection)
-	fmt.Println("Real intersection: ", realIntersection)
-	fmt.Println("Real time:", realTime)
+	if isDebug {
+		fmt.Println("Insecure intersection: ", realIntersection)
+		fmt.Println("Insecure time:", insecureTime)
+	}
 
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	naiveTime, naiveIntersection := findNaiveHashingIntersection(clientSet, serverSet)
+	sort.Sort(naiveIntersection)
+	if isDebug {
+		fmt.Println("Naive hashing intersection:", naiveIntersection)
+		fmt.Println("Naive hashing time:", naiveTime)
+	}
+
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	setupTime, scheme := NewDualAPSIScheme()
+	if isDebug {
+		fmt.Println("Setup time:", setupTime)
+	}
+
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
 	clientSigningTime, clientSignatures :=
 		scheme.generateSignaturesOnSet(clientSet, ClientParty)
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
 	serverSigningTime, serverSignatures :=
 		scheme.generateSignaturesOnSet(serverSet, ServerParty)
-	fmt.Println("Client signing time (avg):", clientSigningTime / time.Duration(clientCardinality))
-	fmt.Println("Server signing time (avg):", serverSigningTime / time.Duration(serverCardinality))
+	if isDebug {
+		fmt.Println("Client signing time (avg):", clientSigningTime / time.Duration(clientCardinality))
+		fmt.Println("Server signing time (avg):", serverSigningTime / time.Duration(serverCardinality))
+	}
 
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
 	interactionTime, protocolIntersection := scheme.Interaction(clientSet, clientSignatures, serverSet, serverSignatures)
 	sort.Sort(protocolIntersection)
-	fmt.Println("Interaction time:", interactionTime)
-	fmt.Println("Protocol intersection: ", protocolIntersection)
-
-	interactionTime, protocolIntersection = scheme.ThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures)
-	sort.Sort(protocolIntersection)
-	fmt.Println("Threaded interaction time:", interactionTime)
-	fmt.Println("Protocol threaded intersection: ", protocolIntersection)
+	if isDebug {
+		fmt.Println("Interaction time:", interactionTime)
+		fmt.Println("Protocol intersection: ", protocolIntersection)
+	}
 
 	// Verify equality:
 	isEqual := sameRawElementSlice(realIntersection, protocolIntersection)
-	fmt.Println("Correct?", isEqual)
+	if isDebug {
+		fmt.Println("Correct?", isEqual)
+	}
+
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	threadedTime, protocolIntersection := scheme.ThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures)
+	sort.Sort(protocolIntersection)
+	if isDebug {
+		fmt.Println("Threaded interaction time:", threadedTime)
+		fmt.Println("Protocol threaded intersection: ", protocolIntersection)
+	}
+
+	// Verify equality:
+	isEqual = sameRawElementSlice(realIntersection, protocolIntersection)
+	if isDebug {
+		fmt.Println("Correct?", isEqual)
+	}
+
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	precomputeInteractionTime, protocolIntersection := scheme.PrecomputeThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures)
+	sort.Sort(protocolIntersection)
+	if isDebug {
+		fmt.Println("Precompute interaction time:", precomputeInteractionTime)
+		fmt.Println("Protocol threaded intersection: ", protocolIntersection)
+	}
+
+	for numThreads := 2; numThreads < clientCardinality; numThreads = numThreads * 2 {
+		if doGarbageCollectBetweenRuns {
+			runtime.GC()
+		}
+		smartInterTime, protocolIntersection := scheme.SmarterThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures, numThreads)
+		sort.Sort(protocolIntersection)
+		if isDebug {
+			fmt.Println("Channel job queue interaction time with", numThreads, "threads:", smartInterTime)
+			fmt.Println("Intersection:", protocolIntersection)
+		}
+		if doGarbageCollectBetweenRuns {
+			runtime.GC()
+		}
+		atomicsTime, protocolIntersection := scheme.AtomicsThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures, numThreads)
+		sort.Sort(protocolIntersection)
+		if isDebug {
+			fmt.Println("Atomic job queue interaction time with", numThreads, "threads:", atomicsTime)
+			fmt.Println("Intersection:", protocolIntersection)
+		}
+		if doGarbageCollectBetweenRuns {
+			runtime.GC()
+		}
+		divisionTime, protocolIntersection := scheme.DivisionThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures, numThreads)
+		sort.Sort(protocolIntersection)
+		if isDebug {
+			fmt.Println("Division job queue interaction time with", numThreads, "threads:", divisionTime)
+			fmt.Println("Intersection:", protocolIntersection)
+		}
+	}
+
+
+	// Verify equality:
+	isEqual = sameRawElementSlice(realIntersection, protocolIntersection)
+	if isDebug {
+		fmt.Println("Correct?", isEqual)
+	}
+
+	return DualPSIBenchmark{
+		len(clientSignatures), len(serverSignatures),
+		insecureTime, naiveTime,
+		setupTime,
+		clientSigningTime, serverSigningTime,
+		interactionTime, threadedTime, precomputeInteractionTime,
+	}
 }
 
-func findRealIntersection(clientSet RawElementSlice, serverSet RawElementSlice) (time.Duration, RawElementSlice) {
+func findInsecureIntersection(clientSet RawElementSlice, serverSet RawElementSlice) (time.Duration, RawElementSlice) {
 	startTime := time.Now()
 
 	lookupTable := make(map[RawElement]bool)
@@ -269,6 +742,30 @@ func findRealIntersection(clientSet RawElementSlice, serverSet RawElementSlice) 
 	var intersection RawElementSlice
 	for _, element := range serverSet {
 		_, isInLookup := lookupTable[element]
+		if isInLookup {
+			intersection = append(intersection, element)
+		}
+	}
+
+	totalTime := time.Since(startTime)
+	return totalTime, intersection
+}
+
+func findNaiveHashingIntersection(clientSet RawElementSlice, serverSet RawElementSlice) (time.Duration, RawElementSlice) {
+	startTime := time.Now()
+
+	// Server sends hashes to client:
+	lookupTable := make(map[[32]byte]bool)
+	for _, element := range serverSet {
+		hashed := sha256.Sum256(element[:])
+		lookupTable[hashed] = true
+	}
+
+	// Client does a naive lookup on hashes:
+	var intersection RawElementSlice
+	for _, element := range clientSet {
+		hashed := sha256.Sum256(element[:])
+		_, isInLookup := lookupTable[hashed]
 		if isInLookup {
 			intersection = append(intersection, element)
 		}
@@ -426,13 +923,50 @@ func BenchmarkJouxKeyExchange(isDebug bool) (setupTime time.Duration, onlineTime
 func main() {
 	pbc.SetLogging(false)
 
+	flag.Parse()
+
+	if *cpuprofile != "" {
+		fmt.Println("Running with profiling mode.")
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
 	fmt.Println("Testing Dual-APSI...")
-	BenchmarkDualPSIInteraction(true, 1000, 1000)
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{
+		"Size", "Insecure", "Naive", "Setup",
+		"Signing (Client)", "Signing (Server)",
+		"Interaction", "Interact (Thr)", "Interact (Pre)"})
+
+	setSizes := []int{10000, 100000}
+	for _, size := range setSizes {
+		fmt.Println("Running benchmark for", size, "elements...")
+
+		benchmark := BenchmarkDualPSIInteraction(true, true, size, size)
+
+		table.Append([]string{
+			strconv.Itoa(size),
+			benchmark.insecureTime.String(),
+			benchmark.naiveTime.String(),
+			benchmark.setupTime.String(),
+			benchmark.clientSigningTime.String(),
+			benchmark.serverSigningTime.String(),
+			benchmark.interactionTime.String(),
+			benchmark.threadedTime.String(),
+			benchmark.precomputeInteractionTime.String(),
+		})
+	}
+	table.Render()
 
 	fmt.Println("Testing Joux Benchmark...")
 	BenchmarkJouxKeyExchange(false)
 
-	totalRuns := 1000
+	totalRuns := 100
 	fmt.Println("Running full benchmark with", totalRuns, "runs...")
 	var totalSetup time.Duration
 	var totalOnline time.Duration
@@ -444,6 +978,6 @@ func main() {
 	}
 
 	fmt.Println("Done! Average time elapsed: ")
-	fmt.Println("   (setup) ", totalSetup / 1000)
-	fmt.Println("  (online) ", totalOnline / 1000)
+	fmt.Println("   (setup) ", totalSetup / time.Duration(totalRuns))
+	fmt.Println("  (online) ", totalOnline / time.Duration(totalRuns))
 }

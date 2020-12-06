@@ -18,7 +18,11 @@ RUN ldconfig -v
 
 # Download the Go wrapper around the PBC library:
 RUN go get -u -d github.com/Nik-U/pbc
+RUN go get -u -d github.com/fatih/color
+RUN go get -u -d github.com/olekukonko/tablewriter
+RUN go get -u -d github.com/cornelk/hashmap
 
 # Copy the main.go file to the /apsi directory:
 RUN mkdir /apsi
 COPY main.go /apsi/
+COPY run.sh /apsi/
