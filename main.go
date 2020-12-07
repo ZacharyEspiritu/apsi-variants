@@ -428,7 +428,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var serverLock sync.RWMutex
 
 	numServerElts := len(serverSignatures)
-	numPerServerThread := int(math.Ceil(numServerElts / float64(numThreads)))
+	numPerServerThread := int(math.Ceil(float64(numServerElts) / float64(numThreads)))
 
 	serverWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
@@ -462,7 +462,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var clientLock sync.RWMutex
 
 	numClientElts := len(clientSignatures)
-	numPerClientThread := int(math.Ceil(numClientElts / float64(numThreads)))
+	numPerClientThread := int(math.Ceil(float64(numClientElts) / float64(numThreads)))
 
 	clientWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
