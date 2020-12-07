@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 	"flag"
+	"math"
 
 	"github.com/Nik-U/pbc"
 	"github.com/olekukonko/tablewriter"
@@ -427,7 +428,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var serverLock sync.RWMutex
 
 	numServerElts := len(serverSignatures)
-	numPerServerThread := int(numServerElts / numThreads)
+	numPerServerThread := int(math.Ceil(numServerElts / float64(numThreads)))
 
 	serverWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
@@ -461,7 +462,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var clientLock sync.RWMutex
 
 	numClientElts := len(clientSignatures)
-	numPerClientThread := int(numClientElts / numThreads)
+	numPerClientThread := int(math.Ceil(numClientElts / float64(numThreads)))
 
 	clientWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
@@ -685,7 +686,7 @@ func BenchmarkDualPSIInteraction(isDebug bool, doGarbageCollectBetweenRuns bool,
 		fmt.Println("Protocol threaded intersection: ", protocolIntersection)
 	}
 
-	for numThreads := 2; numThreads < clientCardinality; numThreads = numThreads * 2 {
+	for numThreads := 65536; numThreads < clientCardinality; numThreads = numThreads * 2 {
 		if doGarbageCollectBetweenRuns {
 			runtime.GC()
 		}
