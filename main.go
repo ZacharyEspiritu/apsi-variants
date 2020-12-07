@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 	"flag"
-	"math"
 
 	"github.com/Nik-U/pbc"
 	"github.com/olekukonko/tablewriter"
@@ -428,16 +427,19 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var serverLock sync.RWMutex
 
 	numServerElts := len(serverSignatures)
-	numPerServerThread := float64(numServerElts) / float64(numThreads)
+	numPerServerThread := (numServerElts + numThreads - 1) / numThreads
 
-	serverWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
-		go func(threadNumber int) {
+		str := threadNum * numPerServerThread
+		if (str > numServerElts) {
+			break
+		}
+		serverWG.Add(1)
+		go func(start int) {
 			// Recall that serverSignature = H(c_i)^y.
 			e_sig_rxP := scheme.pairing.NewGT()
 
-			start := int(math.Ceil(numPerServerThread * float64(threadNumber)))
-			end := int(math.Ceil(float64(start) + numPerServerThread))
+			end := start + numPerServerThread
 			if end > numServerElts {
 				end = numServerElts
 			}
@@ -452,7 +454,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 			}
 
 			serverWG.Done()
-		}(threadNum)
+		}(str)
 	}
 	serverWG.Wait()
 
@@ -462,15 +464,18 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var clientLock sync.RWMutex
 
 	numClientElts := len(clientSignatures)
-	numPerClientThread := float64(numClientElts) / float64(numThreads)
+	numPerClientThread := (numClientElts + numThreads - 1) / numThreads
 
-	clientWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
-		go func(threadNumber int) {
+		str := threadNum * numPerClientThread
+		if (str > numClientElts) {
+			break
+		}
+		clientWG.Add(1)
+		go func(start int) {
 			e_sig_ryP := scheme.pairing.NewGT()
 
-			start := int(math.Ceil(numPerClientThread * float64(threadNumber)))
-			end := int(math.Ceil(float64(start) + numPerClientThread))
+			end := start + numPerClientThread
 			if end > numClientElts {
 				end = numClientElts
 			}
@@ -488,7 +493,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 			}
 
 			clientWG.Done()
-		}(threadNum)
+		}(str)
 	}
 	clientWG.Wait()
 
