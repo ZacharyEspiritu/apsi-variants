@@ -428,7 +428,7 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var serverLock sync.RWMutex
 
 	numServerElts := len(serverSignatures)
-	numPerServerThread := int(math.Ceil(float64(numServerElts) / float64(numThreads)))
+	numPerServerThread := float64(numServerElts) / float64(numThreads)
 
 	serverWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
@@ -436,8 +436,8 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 			// Recall that serverSignature = H(c_i)^y.
 			e_sig_rxP := scheme.pairing.NewGT()
 
-			start := numPerServerThread * threadNumber
-			end := start + numPerServerThread
+			start := int(math.Ceil(numPerServerThread * float64(threadNumber)))
+			end := int(math.Ceil(float64(start) + numPerServerThread))
 			if end > numServerElts {
 				end = numServerElts
 			}
@@ -462,15 +462,15 @@ func (scheme *DualAPSIScheme) DivisionThreadedInteraction(
 	var clientLock sync.RWMutex
 
 	numClientElts := len(clientSignatures)
-	numPerClientThread := int(math.Ceil(float64(numClientElts) / float64(numThreads)))
+	numPerClientThread := float64(numClientElts) / float64(numThreads)
 
 	clientWG.Add(numThreads)
 	for threadNum := 0; threadNum < numThreads; threadNum++ {
 		go func(threadNumber int) {
 			e_sig_ryP := scheme.pairing.NewGT()
 
-			start := numPerClientThread * threadNumber
-			end := start + numPerClientThread
+			start := int(math.Ceil(numPerClientThread * float64(threadNumber)))
+			end := int(math.Ceil(float64(start) + numPerClientThread))
 			if end > numClientElts {
 				end = numClientElts
 			}
