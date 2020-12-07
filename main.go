@@ -974,7 +974,7 @@ func main() {
 		"Signing (Client)", "Signing (Server)",
 		"Interaction", "Interact (Thr)", "Interact (Pre)"})
 
-	setSizes := []int{100000}
+	setSizes := []int{10, 100, 1000, 10000, 100000}
 	for _, size := range setSizes {
 		fmt.Println("Running benchmark for", size, "elements...")
 
