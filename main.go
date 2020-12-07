@@ -686,7 +686,7 @@ func BenchmarkDualPSIInteraction(isDebug bool, doGarbageCollectBetweenRuns bool,
 		fmt.Println("Protocol threaded intersection: ", protocolIntersection)
 	}
 
-	for numThreads := 65536; numThreads < clientCardinality; numThreads = numThreads * 2 {
+	for numThreads := 0; numThreads < clientCardinality; numThreads = numThreads * 2 {
 		if doGarbageCollectBetweenRuns {
 			runtime.GC()
 		}
