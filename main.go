@@ -715,6 +715,36 @@ func BenchmarkDualPSIInteraction(isDebug bool, doGarbageCollectBetweenRuns bool,
 		}
 	}
 
+	// Re-run with clientCardinality threads.
+	numThreads := clientCardinality
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	smartInterTime, protocolIntersection := scheme.SmarterThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures, numThreads)
+	sort.Sort(protocolIntersection)
+	if isDebug {
+		fmt.Println("Channel job queue interaction time with", numThreads, "threads:", smartInterTime)
+		fmt.Println("Intersection:", protocolIntersection)
+	}
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	atomicsTime, protocolIntersection := scheme.AtomicsThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures, numThreads)
+	sort.Sort(protocolIntersection)
+	if isDebug {
+		fmt.Println("Atomic job queue interaction time with", numThreads, "threads:", atomicsTime)
+		fmt.Println("Intersection:", protocolIntersection)
+	}
+	if doGarbageCollectBetweenRuns {
+		runtime.GC()
+	}
+	divisionTime, protocolIntersection := scheme.DivisionThreadedInteraction(clientSet, clientSignatures, serverSet, serverSignatures, numThreads)
+	sort.Sort(protocolIntersection)
+	if isDebug {
+		fmt.Println("Division job queue interaction time with", numThreads, "threads:", divisionTime)
+		fmt.Println("Intersection:", protocolIntersection)
+	}
+
 
 	// Verify equality:
 	isEqual = sameRawElementSlice(realIntersection, protocolIntersection)
@@ -943,7 +973,7 @@ func main() {
 		"Signing (Client)", "Signing (Server)",
 		"Interaction", "Interact (Thr)", "Interact (Pre)"})
 
-	setSizes := []int{10000, 100000}
+	setSizes := []int{100000}
 	for _, size := range setSizes {
 		fmt.Println("Running benchmark for", size, "elements...")
 
